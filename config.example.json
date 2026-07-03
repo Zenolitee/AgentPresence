@@ -1,0 +1,20 @@
+{
+  "client_id": "1522704011491545159",
+  "large_image": "codex-logo",
+  "large_text": "Codex",
+  "hide_project": false,
+  "hide_model": false,
+  "show_branch": true,
+  "flavor_text": true,
+  "show_activity": true,
+  "show_surface": true,
+  "show_plan": false,
+  "show_tokens": true,
+  "show_cost": true,
+  "show_context": false,
+  "show_limits": false,
+  "priority_presence": true,
+  "poll_seconds": 2,
+  "stale_seconds": 180,
+  "codex_home": null
+}
