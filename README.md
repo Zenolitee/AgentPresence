@@ -98,6 +98,7 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
   "client_id": "1522704011491545159",
   "opencode_client_id": "1522861438778212463",
   "pi_client_id": "1522861633909821581",
+
   "large_image": "codex-logo",
   "large_text": "Codex",
   "claude_large_image": "claude-logo",
@@ -106,26 +107,29 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
   "opencode_large_text": "OpenCode",
   "pi_large_image": "pi-logo",
   "pi_large_text": "Pi",
-  "hide_project": false,
+
+  "hide_project": true,
   "hide_model": false,
-  "show_branch": true,
+  "show_branch": false,
   "flavor_text": true,
   "show_activity": true,
   "show_surface": true,
   "show_plan": false,
   "show_tokens": true,
-  "show_cost": true,
+  "show_cost": false,
   "show_context": false,
   "show_limits": false,
   "priority_presence": true,
+
   "detect_processes": true,
   "detect_codex": true,
   "detect_pi": true,
   "detect_opencode": true,
-  "poll_seconds": 2,
-  "stale_seconds": 180,
+
   "codex_home": null,
-  "pi_home": null
+  "pi_home": null,
+  "poll_seconds": 2,
+  "stale_seconds": 180
 }
 ```
 
