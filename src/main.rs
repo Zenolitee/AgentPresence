@@ -1,11 +1,20 @@
 use rusqlite::Connection;
 use serde_json::Value;
 use std::env;
+use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime};
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetForegroundWindow() -> *mut c_void;
+    fn GetWindowTextW(hWnd: *mut c_void, lpString: *mut u16, nMaxCount: i32) -> i32;
+    fn GetWindowThreadProcessId(hWnd: *mut c_void, lpdwProcessId: *mut u32) -> u32;
+}
 
 const DEFAULT_LARGE_IMAGE: &str = "codex-logo";
 const DEFAULT_LARGE_TEXT: &str = "Codex";
@@ -100,11 +109,12 @@ fn run() -> io::Result<()> {
 
     match command.as_str() {
         "status" => print_status(&config),
+        "debug" => print_debug(&config),
         "once" => publish_once(&config),
         "clear" => clear_all_presences(&config),
         "run" => run_loop(&config),
         _ => {
-            eprintln!("usage: multi-agent-presence [--ignore-opencode] [run|once|status|clear]");
+            eprintln!("usage: multi-agent-presence [--ignore-opencode] [run|once|status|debug|clear]");
             Ok(())
         }
     }
@@ -233,6 +243,13 @@ fn print_status(config: &Config) -> io::Result<()> {
         }
     );
 
+    let active_project = get_active_project_from_window();
+    if let Some(ref project) = active_project {
+        println!("active window project: {project}");
+    } else {
+        println!("active window project: (none detected)");
+    }
+
     match collect_session(config)? {
         Some(session) => {
             println!("agent: {}", session.agent.display_name());
@@ -293,6 +310,26 @@ fn print_status(config: &Config) -> io::Result<()> {
         None => println!("latest session: none"),
     }
 
+    Ok(())
+}
+
+fn print_debug(_config: &Config) -> io::Result<()> {
+    let raw_title = get_foreground_window_title().unwrap_or_else(|| "(null)".to_string());
+    println!("raw foreground title: [{raw_title}]");
+    match extract_path_from_title(&raw_title) {
+        Some(path) => {
+            println!("extracted path: {}", path.display());
+            println!(
+                "file name: {}",
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("(none)")
+            );
+        }
+        None => {
+            println!("extracted path: (none)");
+        }
+    }
     Ok(())
 }
 
@@ -447,7 +484,7 @@ fn clear_presence(client_id: &str) -> io::Result<()> {
     discord.set_activity(None)
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct AgentSession {
     agent: AgentKind,
     path: Option<PathBuf>,
@@ -521,7 +558,13 @@ fn collect_session(config: &Config) -> io::Result<Option<AgentSession>> {
         }
     }
 
-    Ok(select_best_session(sessions))
+    let processes = get_process_list();
+    let foreground_agent = agent_from_foreground_pid(&processes);
+    Ok(select_best_session(
+        sessions,
+        foreground_agent,
+        get_active_project_from_window().as_deref(),
+    ))
 }
 
 fn collect_codex_session(config: &Config) -> io::Result<Option<AgentSession>> {
@@ -839,7 +882,230 @@ fn format_provider_model(_provider: Option<&str>, model: Option<&str>) -> Option
     Some(model.rsplit('/').next().unwrap_or(model).trim().to_string())
 }
 
-fn select_best_session(mut sessions: Vec<AgentSession>) -> Option<AgentSession> {
+fn get_foreground_window_title() -> Option<String> {
+    #[cfg(windows)]
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), 512);
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+fn get_foreground_window_pid() -> Option<u32> {
+    #[cfg(windows)]
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.is_null() {
+            return None;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == 0 {
+            None
+        } else {
+            Some(pid)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ProcessInfo {
+    pid: u32,
+    name: String,
+    command_line: String,
+}
+
+fn get_process_list() -> Vec<ProcessInfo> {
+    let output = std::process::Command::new("powershell")
+        .args([
+            "-NoProfile",
+            "-Command",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+        ])
+        .output();
+
+    let Ok(output) = output else {
+        return Vec::new();
+    };
+
+    if !output.status.success() {
+        return Vec::new();
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    let Ok(value) = serde_json::from_str::<Value>(&text) else {
+        return Vec::new();
+    };
+
+    let items = match &value {
+        Value::Array(arr) => arr.clone(),
+        Value::Object(_) => vec![value.clone()],
+        _ => return Vec::new(),
+    };
+
+    let mut processes = Vec::new();
+    for item in items {
+        let pid = item.get("ProcessId").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let name = item
+            .get("Name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let command_line = item
+            .get("CommandLine")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        processes.push(ProcessInfo {
+            pid,
+            name,
+            command_line,
+        });
+    }
+
+    processes
+}
+
+fn agent_from_foreground_pid(processes: &[ProcessInfo]) -> Option<AgentKind> {
+    let foreground_pid = get_foreground_window_pid()?;
+
+    for proc in processes {
+        if proc.pid != foreground_pid {
+            continue;
+        }
+
+        let name_lower = proc.name.to_ascii_lowercase();
+        let cmd_lower = proc.command_line.to_ascii_lowercase();
+
+        if contains_agent_process(&name_lower, &["opencode", "sst-dev.opencode"])
+            || contains_agent_process(&cmd_lower, &["opencode", "sst-dev.opencode"])
+        {
+            return Some(AgentKind::OpenCode);
+        }
+
+        if contains_agent_process(&name_lower, &["claude", "@anthropic-ai/claude-code"])
+            || contains_agent_process(&cmd_lower, &["claude", "@anthropic-ai/claude-code"])
+        {
+            return Some(AgentKind::Claude);
+        }
+
+        if contains_agent_process(
+            &name_lower,
+            &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
+        ) || contains_agent_process(
+            &cmd_lower,
+            &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
+        ) {
+            return Some(AgentKind::Pi);
+        }
+
+        if contains_agent_process(
+            &name_lower,
+            &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
+        ) || contains_agent_process(
+            &cmd_lower,
+            &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
+        ) {
+            return Some(AgentKind::Codex);
+        }
+    }
+
+    None
+}
+
+fn extract_path_from_title(title: &str) -> Option<PathBuf> {
+    let trimmed = title.trim();
+
+    // Try the whole title as a path first
+    let direct = PathBuf::from(trimmed);
+    if direct.is_dir() {
+        return Some(direct);
+    }
+
+    // Look for a Windows drive-letter path (X:\...) anywhere in the title
+    // Handle prefixes like "PS " and suffixes like ">" from PowerShell prompts
+    let cleaned = trimmed
+        .trim_start_matches("PS ")
+        .trim_start_matches("Administrator: ");
+
+    for (i, _) in cleaned.match_indices(|c: char| c.is_ascii_alphabetic()) {
+        let rest = &cleaned[i..];
+        if rest.len() >= 3 && rest.as_bytes()[1] == b':' && rest.as_bytes()[2] == b'\\' {
+            // Find end of path (stop at >, ", space before non-path, etc.)
+            let mut end = rest.len();
+            for (j, ch) in rest.char_indices().skip(3) {
+                if ch == '>' || ch == '"' {
+                    end = j;
+                    break;
+                }
+            }
+            let candidate = Path::new(&rest[..end]);
+            if candidate.is_dir() {
+                return Some(candidate.to_path_buf());
+            }
+        }
+    }
+
+    None
+}
+
+fn get_active_project_from_window() -> Option<String> {
+    let title = get_foreground_window_title()?;
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Try to extract a directory path from the title
+    if let Some(path) = extract_path_from_title(trimmed) {
+        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+            let name = name.to_string();
+            if !name.trim().is_empty() {
+                return Some(name);
+            }
+        }
+    }
+
+    None
+}
+
+fn select_best_session(
+    mut sessions: Vec<AgentSession>,
+    foreground_agent: Option<AgentKind>,
+    active_project: Option<&str>,
+) -> Option<AgentSession> {
+    if let Some(foreground) = foreground_agent {
+        if let Some(session) = sessions.iter().find(|s| s.agent == foreground) {
+            return Some(session.clone());
+        }
+    }
+
+    if let Some(active) = active_project {
+        if let Some(session) = sessions.iter().find(|s| {
+            s.project
+                .as_deref()
+                .map(|p| p.eq_ignore_ascii_case(active))
+                .unwrap_or(false)
+        }) {
+            return Some(session.clone());
+        }
+    }
+
     sessions.sort_by(|left, right| {
         let left_time = left.started_at.unwrap_or(SystemTime::UNIX_EPOCH);
         let right_time = right.started_at.unwrap_or(SystemTime::UNIX_EPOCH);
