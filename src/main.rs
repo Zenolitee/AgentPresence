@@ -926,6 +926,7 @@ fn get_foreground_window_pid() -> Option<u32> {
 #[derive(Clone, Debug)]
 struct ProcessInfo {
     pid: u32,
+    parent_process_id: u32,
     name: String,
     command_line: String,
 }
@@ -935,7 +936,7 @@ fn get_process_list() -> Vec<ProcessInfo> {
         .args([
             "-NoProfile",
             "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,Name,CommandLine | ConvertTo-Json -Compress",
+            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress",
         ])
         .output();
 
@@ -961,6 +962,10 @@ fn get_process_list() -> Vec<ProcessInfo> {
     let mut processes = Vec::new();
     for item in items {
         let pid = item.get("ProcessId").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let parent_pid = item
+            .get("ParentProcessId")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as u32;
         let name = item
             .get("Name")
             .and_then(Value::as_str)
@@ -973,12 +978,49 @@ fn get_process_list() -> Vec<ProcessInfo> {
             .to_string();
         processes.push(ProcessInfo {
             pid,
+            parent_process_id: parent_pid,
             name,
             command_line,
         });
     }
 
     processes
+}
+
+fn classify_agent(name_lower: &str, cmd_lower: &str) -> Option<AgentKind> {
+    if contains_agent_process(name_lower, &["opencode", "sst-dev.opencode"])
+        || contains_agent_process(cmd_lower, &["opencode", "sst-dev.opencode"])
+    {
+        return Some(AgentKind::OpenCode);
+    }
+
+    if contains_agent_process(name_lower, &["claude", "@anthropic-ai/claude-code"])
+        || contains_agent_process(cmd_lower, &["claude", "@anthropic-ai/claude-code"])
+    {
+        return Some(AgentKind::Claude);
+    }
+
+    if contains_agent_process(
+        name_lower,
+        &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
+    ) || contains_agent_process(
+        cmd_lower,
+        &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
+    ) {
+        return Some(AgentKind::Pi);
+    }
+
+    if contains_agent_process(
+        name_lower,
+        &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
+    ) || contains_agent_process(
+        cmd_lower,
+        &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
+    ) {
+        return Some(AgentKind::Codex);
+    }
+
+    None
 }
 
 fn agent_from_foreground_pid(processes: &[ProcessInfo]) -> Option<AgentKind> {
@@ -992,36 +1034,38 @@ fn agent_from_foreground_pid(processes: &[ProcessInfo]) -> Option<AgentKind> {
         let name_lower = proc.name.to_ascii_lowercase();
         let cmd_lower = proc.command_line.to_ascii_lowercase();
 
-        if contains_agent_process(&name_lower, &["opencode", "sst-dev.opencode"])
-            || contains_agent_process(&cmd_lower, &["opencode", "sst-dev.opencode"])
-        {
-            return Some(AgentKind::OpenCode);
+        if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
+            return Some(agent);
+        }
+    }
+
+    let child_pids: Vec<u32> = processes
+        .iter()
+        .filter(|p| p.parent_process_id == foreground_pid)
+        .map(|p| p.pid)
+        .collect();
+
+    for child_pid in &child_pids {
+        for proc in processes {
+            if proc.pid != *child_pid {
+                continue;
+            }
+            let name_lower = proc.name.to_ascii_lowercase();
+            let cmd_lower = proc.command_line.to_ascii_lowercase();
+            if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
+                return Some(agent);
+            }
         }
 
-        if contains_agent_process(&name_lower, &["claude", "@anthropic-ai/claude-code"])
-            || contains_agent_process(&cmd_lower, &["claude", "@anthropic-ai/claude-code"])
-        {
-            return Some(AgentKind::Claude);
-        }
-
-        if contains_agent_process(
-            &name_lower,
-            &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
-        ) || contains_agent_process(
-            &cmd_lower,
-            &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
-        ) {
-            return Some(AgentKind::Pi);
-        }
-
-        if contains_agent_process(
-            &name_lower,
-            &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
-        ) || contains_agent_process(
-            &cmd_lower,
-            &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
-        ) {
-            return Some(AgentKind::Codex);
+        for grandchild in processes {
+            if grandchild.parent_process_id != *child_pid {
+                continue;
+            }
+            let name_lower = grandchild.name.to_ascii_lowercase();
+            let cmd_lower = grandchild.command_line.to_ascii_lowercase();
+            if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
+                return Some(agent);
+            }
         }
     }
 
