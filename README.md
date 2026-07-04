@@ -10,6 +10,8 @@ It detects which AI coding agent (Codex, Pi, OpenCode) is active in your termina
 
 ## Privacy Model
 
+For a detailed breakdown of what the app accesses, see [TRANSPARENCY.md](TRANSPARENCY.md).
+
 - Reads local session files from `%USERPROFILE%\.codex\sessions`, `%USERPROFILE%\.pi\agent\sessions`, and `%USERPROFILE%\.local\share\opencode\`.
 - Reads OpenCode workspace config from `%APPDATA%\ai.opencode.desktop\`.
 - Optionally scans local process command lines to detect running agents.
@@ -26,7 +28,15 @@ Prerequisites:
 - Discord desktop app running.
 - Rust installed, if building from source.
 
-Build and run:
+### Option 1: Download Prebuilt Binary
+
+Download the latest release from [GitHub Releases](https://github.com/Zenolitee/AgentPresence/releases) and run it directly:
+
+```powershell
+.\multi-agent-presence.exe
+```
+
+### Option 2: Build From Source
 
 ```powershell
 git clone https://github.com/Zenolitee/AgentPresence.git
