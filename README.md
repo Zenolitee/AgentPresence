@@ -2,12 +2,17 @@
 
 A small local Rust runtime that publishes local AI agent activity to Discord Rich Presence.
 
-It reads local Codex session metadata, falls back to lightweight process detection for other agent CLIs, formats the result into a Discord Rich Presence activity, and sends it to the local Discord desktop IPC pipe.
+It detects which AI coding agent (Codex, Pi, OpenCode) is active in your terminals and automatically updates your Discord status. Switch between agents and your Discord status follows.
+
+![OpenCode](assets/example1.png)
+![Codex](assets/example2.png)
+![Pi](assets/example3.png)
 
 ## Privacy Model
 
-- Reads local Codex JSONL session files from `%USERPROFILE%\.codex\sessions` by default.
-- Optionally scans local process command lines to detect Claude Code, OpenCode, and Pi when no active Codex session is found.
+- Reads local session files from `%USERPROFILE%\.codex\sessions`, `%USERPROFILE%\.pi\agent\sessions`, and `%USERPROFILE%\.local\share\opencode\`.
+- Reads OpenCode workspace config from `%APPDATA%\ai.opencode.desktop\`.
+- Optionally scans local process command lines to detect running agents.
 - Sends activity only to the local Discord desktop IPC pipe.
 - Does not make HTTP requests at runtime.
 - Does not install startup entries.
@@ -106,6 +111,7 @@ Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
   "detect_processes": true,
   "detect_codex": true,
   "detect_pi": true,
+  "detect_opencode": true,
   "poll_seconds": 2,
   "stale_seconds": 180,
   "codex_home": null,
@@ -136,8 +142,9 @@ Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
 - `show_limits`: shows quota-window usage, such as `5h 81% | 7d 42%`.
 - `priority_presence`: republishes frequently so Codex stays above other Discord activities more reliably.
 - `detect_processes`: enables fallback process command-line detection for Claude Code, OpenCode, and Pi.
-- `detect_codex`: enables Codex JSONL session detection. Set to `false` when testing OpenCode while this Codex session is still running.
-- `detect_pi`: enables Pi JSONL session detection.
+- `detect_codex`: enables Codex session detection. Set to `false` when testing other agents while Codex is still running.
+- `detect_pi`: enables Pi session detection.
+- `detect_opencode`: enables OpenCode session detection.
 - `poll_seconds`: refresh interval in seconds. With `priority_presence` enabled, use `2`.
 - `stale_seconds`: how long after the latest Codex update a session still counts as active.
 - `codex_home`: optional override for the Codex home directory. Leave `null` to use `%USERPROFILE%\.codex`.
@@ -193,12 +200,7 @@ To use your own Discord application instead:
 
 AgentPresence uses one Discord application and switches `assets.large_image` based on the detected agent. The image values must be uploaded Rich Presence asset keys in that Discord application; Discord cannot read local image files directly.
 
-Detection priority is:
-
-1. Active local session JSONL from Codex or Pi.
-2. Process command-line fallback for OpenCode, Claude Code, and Pi.
-
-Codex and Pi session files can provide richer metadata such as project, model, tokens, and cost when those fields are present. The process fallback can identify the agent and swap images, but it usually cannot infer project, model, tokens, or detailed activity.
+Detection is based on session file modification times. When you type in a terminal, that agent's session file gets updated, and the app switches Discord status to match. Process detection runs as a fallback to confirm agents are still running.
 
 You can temporarily override the client ID through:
 
@@ -224,3 +226,39 @@ cargo run --release -- once
 Discord must be running. The image in `assets/` is only for uploading to your Discord application; Discord Rich Presence references uploaded asset keys, not arbitrary local files.
 
 Cost display is intentionally conservative. Codex session files include token usage, but may not include an authoritative pricing table, so cost is omitted unless a reliable pricing entry is available.
+
+## How Detection Works
+
+AgentPresence detects which AI agent is active by reading session files and checking running processes. Detection is automatic — no manual toggling needed when switching between agents.
+
+### Session File Locations
+
+Each agent stores session data in a specific location under your user profile:
+
+| Agent | Session/Config Path | What It Reads |
+|-------|-------------------|---------------|
+| Codex | `%USERPROFILE%\.codex\sessions\` | JSONL session files (project, model, tokens, cost, activity) |
+| Pi | `%USERPROFILE%\.pi\agent\sessions\` | JSONL session files (project, model, tokens, cost) |
+| OpenCode | `%USERPROFILE%\.local\share\opencode\` | SQLite database (`opencode.db`) for model info |
+| OpenCode | `%APPDATA%\ai.opencode.desktop\` | Workspace and global config files (project, branch) |
+
+### Process Detection
+
+When `detect_processes` is enabled (default), the app also checks running processes as a fallback. It runs a PowerShell command every poll cycle to list all processes and matches against known agent process names:
+
+- **Codex**: `codex.exe`, `codex.cmd`, `@openai/codex`, `openai/codex`
+- **OpenCode**: `opencode`, `sst-dev.opencode`
+- **Pi**: `pi.ai`, `inflection`, `pi desktop`, `pi-node`, `\pi.exe`
+- **Claude Code**: `claude`, `@anthropic-ai/claude-code`
+
+### Agent Switching
+
+The app determines the active agent by comparing session file modification times. When you type in a terminal, that agent's session file gets updated, and the app switches Discord status to match.
+
+### Known Limitations
+
+- **Windows Terminal tabs**: All tabs share the same foreground window PID, so the app cannot distinguish which tab is focused by window handle alone. It relies on session file modification times instead. This means there may be a brief delay when switching tabs until the agent writes to its session file.
+- **Latency**: Each poll cycle runs a PowerShell process to check running agents, adding ~1–2 seconds of overhead. With `priority_presence` enabled, polling happens every 2 seconds.
+- **Pi staleness**: Pi sessions are marked inactive after `stale_seconds` (default 180) of no file writes. If Pi is idle for 3+ minutes, it will not show as active until you type something.
+- **Windows only**: Uses Win32 APIs (`GetForegroundWindow`, `GetWindowTextW`) and PowerShell for process detection. Does not work on macOS or Linux.
+- **Session file format**: Detection depends on each agent writing session data to the expected directory structure. If an agent is installed differently (custom home directory, different session format), detection may not work. Use `codex_home` and `pi_home` config overrides if needed.

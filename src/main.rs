@@ -13,7 +13,6 @@ use std::time::{Duration, SystemTime};
 extern "system" {
     fn GetForegroundWindow() -> *mut c_void;
     fn GetWindowTextW(hWnd: *mut c_void, lpString: *mut u16, nMaxCount: i32) -> i32;
-    fn GetWindowThreadProcessId(hWnd: *mut c_void, lpdwProcessId: *mut u32) -> u32;
 }
 
 const DEFAULT_LARGE_IMAGE: &str = "codex-logo";
@@ -549,22 +548,13 @@ fn collect_session(config: &Config) -> io::Result<Option<AgentSession>> {
                 .find(|existing| existing.agent == session.agent)
             {
                 existing.active = true;
-                if existing.started_at.is_none() {
-                    existing.started_at = session.started_at;
-                }
             } else {
                 sessions.push(session);
             }
         }
     }
 
-    let processes = get_process_list();
-    let foreground_agent = agent_from_foreground_pid(&processes);
-    Ok(select_best_session(
-        sessions,
-        foreground_agent,
-        get_active_project_from_window().as_deref(),
-    ))
+    Ok(select_best_session(sessions, get_active_project_from_window().as_deref()))
 }
 
 fn collect_codex_session(config: &Config) -> io::Result<Option<AgentSession>> {
@@ -605,7 +595,7 @@ fn collect_codex_session(config: &Config) -> io::Result<Option<AgentSession>> {
         context: parsed.context,
         limits: parsed.limits,
         active: true,
-        started_at: metadata.created().ok().or_else(|| metadata.modified().ok()),
+        started_at: metadata.modified().ok(),
     }))
 }
 
@@ -679,10 +669,7 @@ fn collect_pi_session(config: &Config) -> io::Result<Option<AgentSession>> {
         context: None,
         limits: None,
         active: age.as_secs() <= config.stale_seconds,
-        started_at: parsed
-            .started_at
-            .or_else(|| metadata.created().ok())
-            .or(modified),
+        started_at: modified,
     }))
 }
 
@@ -729,10 +716,19 @@ fn collect_opencode_session() -> io::Result<Option<AgentSession>> {
     let branch =
         opencode_branch(&workspace).or_else(|| cwd.as_deref().and_then(git_branch_for_path));
     let model = opencode_model(&global, &workspace, cwd.as_deref());
-    let started_at = workspace_path
+
+    let db_dir = home_dir()
+        .ok()
+        .map(|h| h.join(".local").join("share").join("opencode"));
+    let started_at = db_dir
         .as_ref()
-        .and_then(|path| fs::metadata(path).ok())
-        .and_then(|metadata| metadata.modified().ok())
+        .and_then(|dir| most_recent_file_mtime(dir))
+        .or_else(|| {
+            workspace_path
+                .as_ref()
+                .and_then(|path| fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok())
+        })
         .or_else(|| {
             fs::metadata(&global_path)
                 .ok()
@@ -902,176 +898,6 @@ fn get_foreground_window_title() -> Option<String> {
     }
 }
 
-fn get_foreground_window_pid() -> Option<u32> {
-    #[cfg(windows)]
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.is_null() {
-            return None;
-        }
-        let mut pid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, &mut pid);
-        if pid == 0 {
-            None
-        } else {
-            Some(pid)
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        None
-    }
-}
-
-#[derive(Clone, Debug)]
-struct ProcessInfo {
-    pid: u32,
-    parent_process_id: u32,
-    name: String,
-    command_line: String,
-}
-
-fn get_process_list() -> Vec<ProcessInfo> {
-    let output = std::process::Command::new("powershell")
-        .args([
-            "-NoProfile",
-            "-Command",
-            "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress",
-        ])
-        .output();
-
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-
-    if !output.status.success() {
-        return Vec::new();
-    }
-
-    let text = String::from_utf8_lossy(&output.stdout);
-    let Ok(value) = serde_json::from_str::<Value>(&text) else {
-        return Vec::new();
-    };
-
-    let items = match &value {
-        Value::Array(arr) => arr.clone(),
-        Value::Object(_) => vec![value.clone()],
-        _ => return Vec::new(),
-    };
-
-    let mut processes = Vec::new();
-    for item in items {
-        let pid = item.get("ProcessId").and_then(Value::as_u64).unwrap_or(0) as u32;
-        let parent_pid = item
-            .get("ParentProcessId")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as u32;
-        let name = item
-            .get("Name")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let command_line = item
-            .get("CommandLine")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        processes.push(ProcessInfo {
-            pid,
-            parent_process_id: parent_pid,
-            name,
-            command_line,
-        });
-    }
-
-    processes
-}
-
-fn classify_agent(name_lower: &str, cmd_lower: &str) -> Option<AgentKind> {
-    if contains_agent_process(name_lower, &["opencode", "sst-dev.opencode"])
-        || contains_agent_process(cmd_lower, &["opencode", "sst-dev.opencode"])
-    {
-        return Some(AgentKind::OpenCode);
-    }
-
-    if contains_agent_process(name_lower, &["claude", "@anthropic-ai/claude-code"])
-        || contains_agent_process(cmd_lower, &["claude", "@anthropic-ai/claude-code"])
-    {
-        return Some(AgentKind::Claude);
-    }
-
-    if contains_agent_process(
-        name_lower,
-        &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
-    ) || contains_agent_process(
-        cmd_lower,
-        &["pi.ai", "inflection", "pi desktop", "pi-node", "\\pi.exe"],
-    ) {
-        return Some(AgentKind::Pi);
-    }
-
-    if contains_agent_process(
-        name_lower,
-        &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
-    ) || contains_agent_process(
-        cmd_lower,
-        &["@openai/codex", "openai\\codex", "openai/codex", "codex.exe", "codex.cmd", "codex "],
-    ) {
-        return Some(AgentKind::Codex);
-    }
-
-    None
-}
-
-fn agent_from_foreground_pid(processes: &[ProcessInfo]) -> Option<AgentKind> {
-    let foreground_pid = get_foreground_window_pid()?;
-
-    for proc in processes {
-        if proc.pid != foreground_pid {
-            continue;
-        }
-
-        let name_lower = proc.name.to_ascii_lowercase();
-        let cmd_lower = proc.command_line.to_ascii_lowercase();
-
-        if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
-            return Some(agent);
-        }
-    }
-
-    let child_pids: Vec<u32> = processes
-        .iter()
-        .filter(|p| p.parent_process_id == foreground_pid)
-        .map(|p| p.pid)
-        .collect();
-
-    for child_pid in &child_pids {
-        for proc in processes {
-            if proc.pid != *child_pid {
-                continue;
-            }
-            let name_lower = proc.name.to_ascii_lowercase();
-            let cmd_lower = proc.command_line.to_ascii_lowercase();
-            if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
-                return Some(agent);
-            }
-        }
-
-        for grandchild in processes {
-            if grandchild.parent_process_id != *child_pid {
-                continue;
-            }
-            let name_lower = grandchild.name.to_ascii_lowercase();
-            let cmd_lower = grandchild.command_line.to_ascii_lowercase();
-            if let Some(agent) = classify_agent(&name_lower, &cmd_lower) {
-                return Some(agent);
-            }
-        }
-    }
-
-    None
-}
-
 fn extract_path_from_title(title: &str) -> Option<PathBuf> {
     let trimmed = title.trim();
 
@@ -1130,15 +956,8 @@ fn get_active_project_from_window() -> Option<String> {
 
 fn select_best_session(
     mut sessions: Vec<AgentSession>,
-    foreground_agent: Option<AgentKind>,
     active_project: Option<&str>,
 ) -> Option<AgentSession> {
-    if let Some(foreground) = foreground_agent {
-        if let Some(session) = sessions.iter().find(|s| s.agent == foreground) {
-            return Some(session.clone());
-        }
-    }
-
     if let Some(active) = active_project {
         if let Some(session) = sessions.iter().find(|s| {
             s.project
@@ -1648,6 +1467,32 @@ fn newest_matching_file(dir: &Path, prefix: &str, suffix: &str) -> io::Result<Op
     }
 
     Ok(newest.map(|(path, _)| path))
+}
+
+fn most_recent_file_mtime(dir: &Path) -> Option<SystemTime> {
+    if !dir.exists() {
+        return None;
+    }
+    let mut newest: Option<SystemTime> = None;
+    let _ = visit_mtime(dir, &mut newest);
+    newest
+}
+
+fn visit_mtime(dir: &Path, newest: &mut Option<SystemTime>) -> io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            let _ = visit_mtime(&path, newest);
+            continue;
+        }
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        if newest.map(|t| modified > t).unwrap_or(true) {
+            *newest = Some(modified);
+        }
+    }
+    Ok(())
 }
 
 fn visit_jsonl(dir: &Path, newest: &mut Option<(PathBuf, SystemTime)>) -> io::Result<()> {
