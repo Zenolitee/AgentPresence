@@ -1,12 +1,13 @@
 # AgentPresence
 
-A small local Rust runtime that publishes Codex terminal activity to Discord Rich Presence.
+A small local Rust runtime that publishes local AI agent activity to Discord Rich Presence.
 
-It reads local Codex session metadata, formats it into a Discord Rich Presence activity, and sends it to the local Discord desktop IPC pipe.
+It reads local Codex session metadata, falls back to lightweight process detection for other agent CLIs, formats the result into a Discord Rich Presence activity, and sends it to the local Discord desktop IPC pipe.
 
 ## Privacy Model
 
 - Reads local Codex JSONL session files from `%USERPROFILE%\.codex\sessions` by default.
+- Optionally scans local process command lines to detect Claude Code, OpenCode, and Pi when no active Codex session is found.
 - Sends activity only to the local Discord desktop IPC pipe.
 - Does not make HTTP requests at runtime.
 - Does not install startup entries.
@@ -43,7 +44,7 @@ cargo run --release -- once
 If using a prebuilt executable:
 
 ```powershell
-.\target\release\codex-discord-presence.exe
+.\target\release\multi-agent-presence.exe
 ```
 
 ## Config Location
@@ -80,8 +81,16 @@ Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
 ```json
 {
   "client_id": "1522704011491545159",
+  "opencode_client_id": "1522861438778212463",
+  "pi_client_id": "1522861633909821581",
   "large_image": "codex-logo",
   "large_text": "Codex",
+  "claude_large_image": "claude-logo",
+  "claude_large_text": "Claude Code",
+  "opencode_large_image": "opencode-logo",
+  "opencode_large_text": "OpenCode",
+  "pi_large_image": "pi-logo",
+  "pi_large_text": "Pi",
   "hide_project": false,
   "hide_model": false,
   "show_branch": true,
@@ -94,17 +103,26 @@ Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
   "show_context": false,
   "show_limits": false,
   "priority_presence": true,
+  "detect_processes": true,
+  "detect_codex": true,
+  "detect_pi": true,
   "poll_seconds": 2,
   "stale_seconds": 180,
-  "codex_home": null
+  "codex_home": null,
+  "pi_home": null
 }
 ```
 
 ### Option Reference
 
 - `client_id`: Discord application ID used for the Rich Presence app name and assets. The default uses the shared AgentPresence app.
-- `large_image`: Discord Rich Presence asset key for the large image. The shared app expects `codex-logo`.
-- `large_text`: Hover text for the large image.
+- `opencode_client_id`: Discord application ID used when OpenCode is detected.
+- `pi_client_id`: Discord application ID used when Pi is detected.
+- `large_image`: Discord Rich Presence asset key for Codex. The shared app expects `codex-logo`.
+- `large_text`: hover text for the Codex image.
+- `claude_large_image` / `claude_large_text`: Discord asset key and hover text used when Claude Code is detected.
+- `opencode_large_image` / `opencode_large_text`: Discord asset key and hover text used when OpenCode is detected.
+- `pi_large_image` / `pi_large_text`: Discord asset key and hover text used when Pi is detected.
 - `hide_project`: when `true`, hides the current workspace folder name.
 - `hide_model`: when `true`, hides the model name, such as `GPT-5.5`.
 - `show_branch`: shows the current git branch when the workspace is inside a git repo.
@@ -117,9 +135,13 @@ Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
 - `show_context`: shows latest context-window usage, such as `Ctx 58% used`.
 - `show_limits`: shows quota-window usage, such as `5h 81% | 7d 42%`.
 - `priority_presence`: republishes frequently so Codex stays above other Discord activities more reliably.
+- `detect_processes`: enables fallback process command-line detection for Claude Code, OpenCode, and Pi.
+- `detect_codex`: enables Codex JSONL session detection. Set to `false` when testing OpenCode while this Codex session is still running.
+- `detect_pi`: enables Pi JSONL session detection.
 - `poll_seconds`: refresh interval in seconds. With `priority_presence` enabled, use `2`.
 - `stale_seconds`: how long after the latest Codex update a session still counts as active.
 - `codex_home`: optional override for the Codex home directory. Leave `null` to use `%USERPROFILE%\.codex`.
+- `pi_home`: optional override for the Pi home directory. Leave `null` to use `%USERPROFILE%\.pi`.
 
 ## What Shows Where
 
@@ -164,8 +186,19 @@ To use your own Discord application instead:
 
 1. Create a Discord application at <https://discord.com/developers/applications>.
 2. Copy the application Client ID.
-3. Upload `assets/codex-logo.png` as a Rich Presence art asset named `codex-logo`.
-4. Replace `client_id` in `%USERPROFILE%\.codex-discord-presence\config.json`.
+3. Upload the files in `assets/` as Rich Presence art assets. The default config expects `codex-logo`, `claude-logo`, `opencode-logo`, and `pi-logo`.
+4. Replace `client_id`, `opencode_client_id`, and `pi_client_id` in `%USERPROFILE%\.codex-discord-presence\config.json` if you want to use your own apps instead of the defaults.
+
+## Multi-Agent Images
+
+AgentPresence uses one Discord application and switches `assets.large_image` based on the detected agent. The image values must be uploaded Rich Presence asset keys in that Discord application; Discord cannot read local image files directly.
+
+Detection priority is:
+
+1. Active local session JSONL from Codex or Pi.
+2. Process command-line fallback for OpenCode, Claude Code, and Pi.
+
+Codex and Pi session files can provide richer metadata such as project, model, tokens, and cost when those fields are present. The process fallback can identify the agent and swap images, but it usually cannot infer project, model, tokens, or detailed activity.
 
 You can temporarily override the client ID through:
 
