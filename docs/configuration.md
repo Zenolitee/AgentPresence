@@ -3,26 +3,26 @@
 MultiAgent-Presence reads its config from:
 
 ```text
-%USERPROFILE%\.codex-discord-presence\config.json
+%USERPROFILE%\.agent-presence\config.json
 ```
 
 On Windows, that usually means:
 
 ```text
-C:\Users\<you>\.codex-discord-presence\config.json
+C:\Users\<you>\.agent-presence\config.json
 ```
 
 Create the config from the repo default:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex-discord-presence"
-Copy-Item .\config.example.json "$env:USERPROFILE\.codex-discord-presence\config.json"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.agent-presence"
+Copy-Item .\config.example.json "$env:USERPROFILE\.agent-presence\config.json"
 ```
 
 Open it:
 
 ```powershell
-notepad "$env:USERPROFILE\.codex-discord-presence\config.json"
+notepad "$env:USERPROFILE\.agent-presence\config.json"
 ```
 
 ## Default Config

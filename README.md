@@ -64,34 +64,34 @@ If using a prebuilt executable:
 
 ## Config Location
 
-The runtime looks for config here:
+The config file is auto-created on first run at:
 
 ```text
-%USERPROFILE%\.codex-discord-presence\config.json
+%USERPROFILE%\.agent-presence\config.json
 ```
 
 On Windows, that is usually:
 
 ```text
-C:\Users\<you>\.codex-discord-presence\config.json
+C:\Users\<you>\.agent-presence\config.json
 ```
 
 Open it with:
 
 ```powershell
-notepad "$env:USERPROFILE\.codex-discord-presence\config.json"
+notepad "$env:USERPROFILE\.agent-presence\config.json"
 ```
 
-If the file does not exist yet, create it from the example:
+If the file does not exist yet, the app creates it automatically with default values. You can also create it manually:
 
 ```powershell
-New-Item -ItemType Directory -Force "$env:USERPROFILE\.codex-discord-presence"
-Copy-Item .\config.example.json "$env:USERPROFILE\.codex-discord-presence\config.json"
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.agent-presence"
+Copy-Item .\config.example.json "$env:USERPROFILE\.agent-presence\config.json"
 ```
 
 ## Display Options
 
-Edit `%USERPROFILE%\.codex-discord-presence\config.json`:
+Edit `%USERPROFILE%\.agent-presence\config.json`:
 
 ```json
 {
@@ -204,7 +204,7 @@ To use your own Discord application instead:
 1. Create a Discord application at <https://discord.com/developers/applications>.
 2. Copy the application Client ID.
 3. Upload the files in `assets/` as Rich Presence art assets. The default config expects `codex-logo`, `claude-logo`, `opencode-logo`, and `pi-logo`.
-4. Replace `client_id`, `opencode_client_id`, and `pi_client_id` in `%USERPROFILE%\.codex-discord-presence\config.json` if you want to use your own apps instead of the defaults.
+4. Replace `client_id`, `opencode_client_id`, and `pi_client_id` in `%USERPROFILE%\.agent-presence\config.json` if you want to use your own apps instead of the defaults.
 
 ## Multi-Agent Images
 

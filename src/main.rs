@@ -28,6 +28,38 @@ const DEFAULT_PI_CLIENT_ID: &str = "1522861633909821581";
 const PRIORITY_POLL_SECONDS: u64 = 2;
 const DEFAULT_STALE_SECONDS: u64 = 180;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
+const DEFAULT_CONFIG_JSON: &str = r#"{
+  "client_id": "1522704011491545159",
+  "opencode_client_id": "1522861438778212463",
+  "pi_client_id": "1522861633909821581",
+  "large_image": "codex-logo",
+  "large_text": "Codex",
+  "claude_large_image": "claude-logo",
+  "claude_large_text": "Claude Code",
+  "opencode_large_image": "opencode-logo",
+  "opencode_large_text": "OpenCode",
+  "pi_large_image": "pi-logo",
+  "pi_large_text": "Pi",
+  "hide_project": false,
+  "hide_model": false,
+  "show_branch": true,
+  "flavor_text": true,
+  "show_activity": true,
+  "show_surface": true,
+  "show_plan": true,
+  "show_tokens": true,
+  "show_cost": true,
+  "show_context": true,
+  "show_limits": true,
+  "priority_presence": true,
+  "detect_processes": true,
+  "detect_codex": true,
+  "detect_pi": true,
+  "detect_opencode": true,
+  "poll_seconds": 2,
+  "stale_seconds": 180
+}
+"#;
 const ACTIVE_DETAILS: [&str; 50] = [
     "Arguing with TypeScript",
     "Bribing the compiler",
@@ -157,10 +189,15 @@ struct Config {
 impl Config {
     fn load() -> io::Result<Self> {
         let user_home = home_dir()?;
-        let config_path = user_home
-            .join(".codex-discord-presence")
-            .join("config.json");
-        let file_config = fs::read_to_string(config_path).unwrap_or_default();
+        let config_dir = user_home.join(".agent-presence");
+        let config_path = config_dir.join("config.json");
+
+        if !config_path.exists() {
+            let _ = fs::create_dir_all(&config_dir);
+            let _ = fs::write(&config_path, DEFAULT_CONFIG_JSON);
+        }
+
+        let file_config = fs::read_to_string(&config_path).unwrap_or_default();
 
         let client_id = env::var("CODEX_DISCORD_CLIENT_ID")
             .ok()

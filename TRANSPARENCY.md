@@ -17,14 +17,14 @@ AgentPresence is a Discord Rich Presence client. It detects which AI coding agen
 | `%USERPROFILE%\.local\share\opencode\opencode.db` | OpenCode SQLite database (model info) |
 | `%APPDATA%\ai.opencode.desktop\opencode.global.dat` | OpenCode global config (project path) |
 | `%APPDATA%\ai.opencode.desktop\opencode.workspace.*.dat` | OpenCode workspace state (branch info) |
-| `%USERPROFILE%\.codex-discord-presence\config.json` | App configuration |
+| `%USERPROFILE%\.agent-presence\config.json` | App configuration |
 | `.git\HEAD` | Git branch detection (only when inside a git repo) |
 
 ### Files Written
 
 | Path | Purpose |
 |------|---------|
-| `%USERPROFILE%\.codex-discord-presence\config.json` | Only if you explicitly configure the app |
+| `%USERPROFILE%\.agent-presence\config.json` | Only if you explicitly configure the app |
 
 ### Processes Checked
 
@@ -94,7 +94,7 @@ The binary will be at `target\release\multi-agent-presence.exe`.
 
 ## Configuration
 
-The app reads configuration from `%USERPROFILE%\.codex-discord-presence\config.json`. All detection flags default to `true`. You can disable specific agent detection by setting the corresponding flag to `false`:
+The app reads configuration from `%USERPROFILE%\.agent-presence\config.json`. All detection flags default to `true`. You can disable specific agent detection by setting the corresponding flag to `false`:
 
 ```json
 {
