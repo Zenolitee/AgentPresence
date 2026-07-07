@@ -2,7 +2,7 @@
 
 A small local Rust runtime that publishes local AI agent activity to Discord Rich Presence.
 
-It detects which AI coding agent (Codex, Pi, OpenCode) is active in your terminals and automatically updates your Discord status. Switch between agents and your Discord status follows.
+It detects which AI coding agent (Codex, Pi, OpenCode, Oh My Pi) is active in your terminals and automatically updates your Discord status. Switch between agents and your Discord status follows.
 
 ![OpenCode](assets/example1.png)
 ![Codex](assets/example2.png)
@@ -12,7 +12,7 @@ It detects which AI coding agent (Codex, Pi, OpenCode) is active in your termina
 
 For a detailed breakdown of what the app accesses, see [TRANSPARENCY.md](TRANSPARENCY.md).
 
-- Reads local session files from `%USERPROFILE%\.codex\sessions`, `%USERPROFILE%\.pi\agent\sessions`, and `%USERPROFILE%\.local\share\opencode\`.
+- Reads local session files from `%USERPROFILE%\.codex\sessions`, `%USERPROFILE%\.pi\agent\sessions`, `%USERPROFILE%\.omp\agent\sessions`, and `%USERPROFILE%\.local\share\opencode\`.
 - Reads OpenCode workspace config from `%APPDATA%\ai.opencode.desktop\`.
 - Optionally scans local process command lines to detect running agents.
 - Sends activity only to the local Discord desktop IPC pipe.
@@ -98,6 +98,7 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
   "client_id": "1522704011491545159",
   "opencode_client_id": "1522861438778212463",
   "pi_client_id": "1522861633909821581",
+  "omp_client_id": "1522861633909821581",
 
   "large_image": "codex-logo",
   "large_text": "Codex",
@@ -107,6 +108,8 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
   "opencode_large_text": "OpenCode",
   "pi_large_image": "pi-logo",
   "pi_large_text": "Pi",
+  "omp_large_image": "omp-logo",
+  "omp_large_text": "Oh My Pi",
 
   "hide_project": true,
   "hide_model": false,
@@ -125,9 +128,11 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
   "detect_codex": true,
   "detect_pi": true,
   "detect_opencode": true,
+  "detect_omp": true,
 
   "codex_home": null,
   "pi_home": null,
+  "omp_home": null,
   "poll_seconds": 2,
   "stale_seconds": 180
 }
@@ -138,11 +143,13 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
 - `client_id`: Discord application ID used for the Rich Presence app name and assets. The default uses the shared AgentPresence app.
 - `opencode_client_id`: Discord application ID used when OpenCode is detected.
 - `pi_client_id`: Discord application ID used when Pi is detected.
+- `omp_client_id`: Discord application ID used when Oh My Pi is detected.
 - `large_image`: Discord Rich Presence asset key for Codex. The shared app expects `codex-logo`.
 - `large_text`: hover text for the Codex image.
 - `claude_large_image` / `claude_large_text`: Discord asset key and hover text used when Claude Code is detected.
 - `opencode_large_image` / `opencode_large_text`: Discord asset key and hover text used when OpenCode is detected.
 - `pi_large_image` / `pi_large_text`: Discord asset key and hover text used when Pi is detected.
+- `omp_large_image` / `omp_large_text`: Discord asset key and hover text used when Oh My Pi is detected.
 - `hide_project`: when `true`, hides the current workspace folder name.
 - `hide_model`: when `true`, hides the model name, such as `GPT-5.5`.
 - `show_branch`: shows the current git branch when the workspace is inside a git repo.
@@ -155,14 +162,16 @@ Edit `%USERPROFILE%\.agent-presence\config.json`:
 - `show_context`: shows latest context-window usage, such as `Ctx 58% used`.
 - `show_limits`: shows quota-window usage, such as `5h 81% | 7d 42%`.
 - `priority_presence`: republishes frequently so Codex stays above other Discord activities more reliably.
-- `detect_processes`: enables fallback process command-line detection for Claude Code, OpenCode, and Pi.
+- `detect_processes`: enables fallback process command-line detection for Claude Code, OpenCode, Pi, and Oh My Pi.
 - `detect_codex`: enables Codex session detection. Set to `false` when testing other agents while Codex is still running.
 - `detect_pi`: enables Pi session detection.
 - `detect_opencode`: enables OpenCode session detection.
+- `detect_omp`: enables Oh My Pi session detection.
 - `poll_seconds`: refresh interval in seconds. With `priority_presence` enabled, use `2`.
 - `stale_seconds`: how long after the latest Codex update a session still counts as active.
 - `codex_home`: optional override for the Codex home directory. Leave `null` to use `%USERPROFILE%\.codex`.
 - `pi_home`: optional override for the Pi home directory. Leave `null` to use `%USERPROFILE%\.pi`.
+- `omp_home`: optional override for the Oh My Pi home directory. Leave `null` to use `%USERPROFILE%\.omp`.
 
 ## What Shows Where
 
@@ -253,6 +262,7 @@ Each agent stores session data in a specific location under your user profile:
 |-------|-------------------|---------------|
 | Codex | `%USERPROFILE%\.codex\sessions\` | JSONL session files (project, model, tokens, cost, activity) |
 | Pi | `%USERPROFILE%\.pi\agent\sessions\` | JSONL session files (project, model, tokens, cost) |
+| Oh My Pi | `%USERPROFILE%\.omp\agent\sessions\` | JSONL session files (project, model, tokens, cost) |
 | OpenCode | `%USERPROFILE%\.local\share\opencode\` | SQLite database (`opencode.db`) for model info |
 | OpenCode | `%APPDATA%\ai.opencode.desktop\` | Workspace and global config files (project, branch) |
 
@@ -262,6 +272,7 @@ When `detect_processes` is enabled (default), the app also checks running proces
 
 - **Codex**: `codex.exe`, `codex.cmd`, `@openai/codex`, `openai/codex`
 - **OpenCode**: `opencode`, `sst-dev.opencode`
+- **Oh My Pi**: `omp`
 - **Pi**: `pi.ai`, `inflection`, `pi desktop`, `pi-node`, `\pi.exe`
 - **Claude Code**: `claude`, `@anthropic-ai/claude-code`
 
@@ -274,5 +285,4 @@ The app determines the active agent by comparing session file modification times
 - **Windows Terminal tabs**: All tabs share the same foreground window PID, so the app cannot distinguish which tab is focused by window handle alone. It relies on session file modification times instead. This means there may be a brief delay when switching tabs until the agent writes to its session file.
 - **Latency**: Each poll cycle runs a PowerShell process to check running agents, adding ~1–2 seconds of overhead. With `priority_presence` enabled, polling happens every 2 seconds.
 - **Pi staleness**: Pi sessions are marked inactive after `stale_seconds` (default 180) of no file writes. If Pi is idle for 3+ minutes, it will not show as active until you type something.
-- **Windows only**: Uses Win32 APIs (`GetForegroundWindow`, `GetWindowTextW`) and PowerShell for process detection. Does not work on macOS or Linux.
-- **Session file format**: Detection depends on each agent writing session data to the expected directory structure. If an agent is installed differently (custom home directory, different session format), detection may not work. Use `codex_home` and `pi_home` config overrides if needed.
+- **Session file format**: Detection depends on each agent writing session data to the expected directory structure. If an agent is installed differently (custom home directory, different session format), detection may not work. Use `codex_home`, `pi_home`, and `omp_home` config overrides if needed.

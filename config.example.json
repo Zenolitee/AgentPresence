@@ -2,6 +2,7 @@
   "client_id": "1522704011491545159",
   "opencode_client_id": "1522861438778212463",
   "pi_client_id": "1522861633909821581",
+  "omp_client_id": "1523945901519929466",
   "large_image": "codex-logo",
   "large_text": "Codex",
   "claude_large_image": "claude-logo",
@@ -10,6 +11,8 @@
   "opencode_large_text": "OpenCode",
   "pi_large_image": "pi-logo",
   "pi_large_text": "Pi",
+  "omp_large_image": "hero",
+  "omp_large_text": "Oh My Pi",
   "hide_project": false,
   "hide_model": false,
   "show_branch": true,
@@ -25,8 +28,11 @@
   "detect_processes": true,
   "detect_codex": true,
   "detect_pi": true,
+  "detect_opencode": true,
+  "detect_omp": true,
   "poll_seconds": 2,
   "stale_seconds": 180,
   "codex_home": null,
-  "pi_home": null
+  "pi_home": null,
+  "omp_home": null
 }

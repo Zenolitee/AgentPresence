@@ -4,7 +4,7 @@ This document explains exactly what AgentPresence does, what data it accesses, a
 
 ## What It Does
 
-AgentPresence is a Discord Rich Presence client. It detects which AI coding agent (Codex, Pi, OpenCode) is running in your terminal and updates your Discord status to show which agent you're using.
+AgentPresence is a Discord Rich Presence client. It detects which AI coding agent (Codex, Pi, OpenCode, Oh My Pi) is running in your terminal and updates your Discord status to show which agent you're using.
 
 ## What It Accesses
 
@@ -14,6 +14,7 @@ AgentPresence is a Discord Rich Presence client. It detects which AI coding agen
 |------|---------|
 | `%USERPROFILE%\.codex\sessions\**\*.jsonl` | Codex session files (project name, model, tokens, activity) |
 | `%USERPROFILE%\.pi\agent\sessions\*.jsonl` | Pi session files (project name, model, tokens) |
+| `%USERPROFILE%\.omp\agent\sessions\*.jsonl` | Oh My Pi session files (project name, model, tokens) |
 | `%USERPROFILE%\.local\share\opencode\opencode.db` | OpenCode SQLite database (model info) |
 | `%APPDATA%\ai.opencode.desktop\opencode.global.dat` | OpenCode global config (project path) |
 | `%APPDATA%\ai.opencode.desktop\opencode.workspace.*.dat` | OpenCode workspace state (branch info) |
@@ -101,6 +102,7 @@ The app reads configuration from `%USERPROFILE%\.agent-presence\config.json`. Al
   "detect_codex": true,
   "detect_pi": true,
   "detect_opencode": true,
+  "detect_omp": true,
   "detect_processes": true
 }
 ```
