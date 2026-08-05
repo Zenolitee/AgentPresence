@@ -1,5 +1,6 @@
 use rusqlite::Connection;
 use serde_json::Value;
+use parking_lot::Mutex;
 use std::env;
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
@@ -7,6 +8,7 @@ use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime};
+mod tui;
 
 #[cfg(windows)]
 #[link(name = "user32")]
@@ -17,14 +19,17 @@ extern "system" {
 
 const DEFAULT_LARGE_IMAGE: &str = "codex-logo";
 const DEFAULT_LARGE_TEXT: &str = "Codex";
-const DEFAULT_CLAUDE_LARGE_IMAGE: &str = "claude-logo";
+const DEFAULT_CLAUDE_LARGE_IMAGE: &str = "claudecode-color";
 const DEFAULT_CLAUDE_LARGE_TEXT: &str = "Claude Code";
+const DEFAULT_CLAUDE_CLIENT_ID: &str = "1525571660877529218";
 const DEFAULT_OPENCODE_LARGE_IMAGE: &str = "opencode-logo";
 const DEFAULT_OPENCODE_LARGE_TEXT: &str = "OpenCode";
 const DEFAULT_PI_LARGE_IMAGE: &str = "pi-logo";
 const DEFAULT_PI_LARGE_TEXT: &str = "Pi";
 const DEFAULT_OPENCODE_CLIENT_ID: &str = "1522861438778212463";
 const DEFAULT_PI_CLIENT_ID: &str = "1522861633909821581";
+const DEFAULT_HERMES_LARGE_IMAGE: &str = "hermes-logo";
+const DEFAULT_HERMES_LARGE_TEXT: &str = "Hermes";
 const PRIORITY_POLL_SECONDS: u64 = 2;
 const DEFAULT_STALE_SECONDS: u64 = 180;
 const MAX_TAIL_BYTES: u64 = 256 * 1024;
@@ -32,27 +37,19 @@ const DEFAULT_CONFIG_JSON: &str = r#"{
   "client_id": "1522704011491545159",
   "opencode_client_id": "1522861438778212463",
   "pi_client_id": "1522861633909821581",
+  "claude_client_id": "1525571660877529218",
+  "hermes_client_id": "",
 
   "large_image": "codex-logo",
-  "large_text": "Codex",
-  "claude_large_image": "claude-logo",
+  "claude_large_image": "claudecode-color",
   "claude_large_text": "Claude Code",
   "opencode_large_image": "opencode-logo",
   "opencode_large_text": "OpenCode",
   "pi_large_image": "pi-logo",
   "pi_large_text": "Pi",
+  "hermes_large_image": "hermes-logo",
+  "hermes_large_text": "Hermes",
 
-  "hide_project": true,
-  "hide_model": false,
-  "show_branch": false,
-  "flavor_text": true,
-  "show_activity": true,
-  "show_surface": true,
-  "show_plan": false,
-  "show_tokens": true,
-  "show_cost": false,
-  "show_context": false,
-  "show_limits": false,
   "priority_presence": true,
 
   "detect_processes": true,
@@ -60,10 +57,13 @@ const DEFAULT_CONFIG_JSON: &str = r#"{
   "detect_pi": true,
   "detect_opencode": true,
   "detect_omp": true,
+  "detect_claude": true,
+  "detect_hermes": true,
 
   "codex_home": null,
   "pi_home": null,
   "omp_home": null,
+  "hermes_home": null,
   "poll_seconds": 2,
   "stale_seconds": 180,
   "omp_client_id": "1523945901519929466",
@@ -71,7 +71,7 @@ const DEFAULT_CONFIG_JSON: &str = r#"{
   "omp_large_text": "Oh My Pi"
 }
 "#;
-const ACTIVE_DETAILS: [&str; 50] = [
+const ACTIVE_DETAILS: [&str; 54] = [
     "Arguing with TypeScript",
     "Bribing the compiler",
     "Negotiating with bugs",
@@ -122,6 +122,10 @@ const ACTIVE_DETAILS: [&str; 50] = [
     "Putting bugs in timeout",
     "Debugging the forbidden soup",
     "Turning errors into lore",
+    "Feeding Hermes tokens",
+    "Letting Hermes cook",
+    "Trusting Hermes implicitly",
+    "Hermes herding cats",
 ];
 const IDLE_DETAILS: [&str; 4] = [
     "Codex idle",
@@ -129,6 +133,10 @@ const IDLE_DETAILS: [&str; 4] = [
     "Standing by",
     "Session quiet",
 ];
+
+/// Cache of first detection time per agent kind.
+/// Keyed by agent kind discriminant (0=Codex, 1=Claude, 2=OpenCode, 3=Pi, 4=OhMyPi, 5=Hermes).
+static FIRST_SEEN: Mutex<Option<[Option<SystemTime>; 6]>> = Mutex::new(None);
 
 fn main() {
     if let Err(error) = run() {
@@ -143,11 +151,14 @@ fn run() -> io::Result<()> {
     if args.iter().any(|a| a == "--ignore-opencode") {
         config.detect_opencode = false;
     }
+    if args.iter().any(|a| a == "--ignore-claude") {
+        config.detect_claude = false;
+    }
     let command = args
         .iter()
         .find(|a| !a.starts_with("--"))
         .cloned()
-        .unwrap_or_else(|| "run".to_string());
+        .unwrap_or_else(|| "tui".to_string());
 
     match command.as_str() {
         "status" => print_status(&config),
@@ -155,9 +166,44 @@ fn run() -> io::Result<()> {
         "once" => publish_once(&config),
         "clear" => clear_all_presences(&config),
         "run" => run_loop(&config),
+        "tui" => run_tui_loop(config),
         _ => {
-            eprintln!("usage: multi-agent-presence [--ignore-opencode] [run|once|status|debug|clear]");
+            eprintln!("usage: multi-agent-presence [--ignore-opencode] [--ignore-claude] [run|tui|once|status|debug|clear]");
             Ok(())
+        }
+    }
+}
+
+/// Per-agent display settings for Discord presence.
+#[derive(Clone, Debug)]
+struct DisplaySettings {
+    show_project: bool,
+    show_model: bool,
+    show_branch: bool,
+    show_activity: bool,
+    show_surface: bool,
+    show_plan: bool,
+    show_tokens: bool,
+    show_cost: bool,
+    show_context: bool,
+    show_limits: bool,
+    flavor_text: bool,
+}
+
+impl Default for DisplaySettings {
+    fn default() -> Self {
+        Self {
+            show_project: true,
+            show_model: true,
+            show_branch: true,
+            show_activity: true,
+            show_surface: true,
+            show_plan: true,
+            show_tokens: true,
+            show_cost: true,
+            show_context: true,
+            show_limits: true,
+            flavor_text: true,
         }
     }
 }
@@ -167,6 +213,8 @@ struct Config {
     client_id: String,
     opencode_client_id: String,
     pi_client_id: String,
+    claude_client_id: String,
+    hermes_client_id: String,
     large_image: String,
     large_text: String,
     claude_large_image: String,
@@ -175,37 +223,41 @@ struct Config {
     opencode_large_text: String,
     pi_large_image: String,
     pi_large_text: String,
-    hide_project: bool,
-    hide_model: bool,
-    show_branch: bool,
-    flavor_text: bool,
-    show_activity: bool,
-    show_surface: bool,
-    show_plan: bool,
-    show_tokens: bool,
-    show_cost: bool,
-    show_context: bool,
-    show_limits: bool,
+    hermes_large_image: String,
+    hermes_large_text: String,
     priority_presence: bool,
     detect_processes: bool,
     detect_codex: bool,
     detect_pi: bool,
     detect_opencode: bool,
     detect_omp: bool,
+    detect_claude: bool,
+    detect_hermes: bool,
     poll_seconds: u64,
     stale_seconds: u64,
     codex_home: PathBuf,
     pi_home: PathBuf,
     omp_home: PathBuf,
+    hermes_home: PathBuf,
     omp_client_id: String,
     omp_large_image: String,
     omp_large_text: String,
+    codex_display: DisplaySettings,
+    claude_display: DisplaySettings,
+    opencode_display: DisplaySettings,
+    pi_display: DisplaySettings,
+    omp_display: DisplaySettings,
+    hermes_display: DisplaySettings,
 }
 
 impl Config {
     fn load() -> io::Result<Self> {
         let user_home = home_dir()?;
         let config_dir = user_home.join(".agent-presence");
+        let local_app_data = env::var("LOCALAPPDATA")
+            .ok()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| user_home.join("AppData").join("Local"));
         let config_path = config_dir.join("config.json");
 
         if !config_path.exists() {
@@ -237,6 +289,10 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_OPENCODE_CLIENT_ID.to_string()),
             pi_client_id: string_field(&file_config, "pi_client_id")
                 .unwrap_or_else(|| DEFAULT_PI_CLIENT_ID.to_string()),
+            claude_client_id: string_field(&file_config, "claude_client_id")
+                .unwrap_or_else(|| DEFAULT_CLAUDE_CLIENT_ID.to_string()),
+            hermes_client_id: string_field(&file_config, "hermes_client_id")
+                .unwrap_or_default(),
             large_image: string_field(&file_config, "large_image")
                 .unwrap_or_else(|| DEFAULT_LARGE_IMAGE.to_string()),
             large_text: string_field(&file_config, "large_text")
@@ -253,23 +309,18 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_PI_LARGE_IMAGE.to_string()),
             pi_large_text: string_field(&file_config, "pi_large_text")
                 .unwrap_or_else(|| DEFAULT_PI_LARGE_TEXT.to_string()),
-            hide_project: bool_field(&file_config, "hide_project").unwrap_or(false),
-            hide_model: bool_field(&file_config, "hide_model").unwrap_or(false),
-            show_branch: bool_field(&file_config, "show_branch").unwrap_or(true),
-            flavor_text: bool_field(&file_config, "flavor_text").unwrap_or(true),
-            show_activity: bool_field(&file_config, "show_activity").unwrap_or(true),
-            show_surface: bool_field(&file_config, "show_surface").unwrap_or(true),
-            show_plan: bool_field(&file_config, "show_plan").unwrap_or(true),
-            show_tokens: bool_field(&file_config, "show_tokens").unwrap_or(true),
-            show_cost: bool_field(&file_config, "show_cost").unwrap_or(true),
-            show_context: bool_field(&file_config, "show_context").unwrap_or(true),
-            show_limits: bool_field(&file_config, "show_limits").unwrap_or(true),
+            hermes_large_image: string_field(&file_config, "hermes_large_image")
+                .unwrap_or_else(|| DEFAULT_HERMES_LARGE_IMAGE.to_string()),
+            hermes_large_text: string_field(&file_config, "hermes_large_text")
+                .unwrap_or_else(|| DEFAULT_HERMES_LARGE_TEXT.to_string()),
             priority_presence: bool_field(&file_config, "priority_presence").unwrap_or(true),
             detect_processes: bool_field(&file_config, "detect_processes").unwrap_or(true),
             detect_codex: bool_field(&file_config, "detect_codex").unwrap_or(true),
             detect_pi: bool_field(&file_config, "detect_pi").unwrap_or(true),
             detect_opencode: bool_field(&file_config, "detect_opencode").unwrap_or(true),
             detect_omp: bool_field(&file_config, "detect_omp").unwrap_or(true),
+            detect_claude: bool_field(&file_config, "detect_claude").unwrap_or(true),
+            detect_hermes: bool_field(&file_config, "detect_hermes").unwrap_or(true),
             poll_seconds: u64_field(&file_config, "poll_seconds").unwrap_or(PRIORITY_POLL_SECONDS),
             stale_seconds: u64_field(&file_config, "stale_seconds")
                 .unwrap_or(DEFAULT_STALE_SECONDS),
@@ -280,14 +331,144 @@ impl Config {
                 .map(PathBuf::from)
                 .or_else(|| string_field(&file_config, "omp_home").map(PathBuf::from))
                 .unwrap_or_else(|| user_home.join(".omp")),
+            hermes_home: env::var("HERMES_HOME")
+                .ok()
+                .map(PathBuf::from)
+                .or_else(|| string_field(&file_config, "hermes_home").map(PathBuf::from))
+                .unwrap_or_else(|| local_app_data.join("hermes")),
             omp_client_id: string_field(&file_config, "omp_client_id")
                 .unwrap_or_else(|| DEFAULT_PI_CLIENT_ID.to_string()),
             omp_large_image: string_field(&file_config, "omp_large_image")
                 .unwrap_or_else(|| "hero".to_string()),
             omp_large_text: string_field(&file_config, "omp_large_text")
                 .unwrap_or_else(|| "Oh My Pi".to_string()),
+            codex_display: load_display_settings(&file_config, "codex"),
+            claude_display: load_display_settings(&file_config, "claude"),
+            opencode_display: load_display_settings(&file_config, "opencode"),
+            pi_display: load_display_settings(&file_config, "pi"),
+            omp_display: load_display_settings(&file_config, "omp"),
+            hermes_display: load_display_settings(&file_config, "hermes"),
         })
     }
+}
+
+fn load_display_settings(file_config: &str, agent: &str) -> DisplaySettings {
+    let prefix = format!("{agent}_");
+    let mut ds = DisplaySettings::default();
+
+    // Parse JSON once
+    let parsed: serde_json::Value =
+        serde_json::from_str(file_config).unwrap_or(serde_json::Value::Null);
+
+    // Try per-agent settings first, fall back to global
+    let get_bool = |key: &str, default: bool| -> bool {
+        let agent_key = format!("{prefix}{key}");
+        parsed
+            .get(&agent_key)
+            .and_then(|v| v.as_bool())
+            .or_else(|| parsed.get(key).and_then(|v| v.as_bool()))
+            .unwrap_or(default)
+    };
+
+    ds.show_project = get_bool("show_project", true);
+    ds.show_model = get_bool("show_model", true);
+    ds.show_branch = get_bool("show_branch", true);
+    ds.show_activity = get_bool("show_activity", true);
+    ds.show_surface = get_bool("show_surface", true);
+    ds.show_plan = get_bool("show_plan", true);
+    ds.show_tokens = get_bool("show_tokens", true);
+    ds.show_cost = get_bool("show_cost", true);
+    ds.show_context = get_bool("show_context", true);
+    ds.show_limits = get_bool("show_limits", true);
+    ds.flavor_text = get_bool("flavor_text", true);
+    ds
+}
+
+fn display_settings_for<'a>(config: &'a Config, agent: AgentKind) -> &'a DisplaySettings {
+    match agent {
+        AgentKind::Codex => &config.codex_display,
+        AgentKind::Claude => &config.claude_display,
+        AgentKind::OpenCode => &config.opencode_display,
+        AgentKind::Pi => &config.pi_display,
+        AgentKind::OhMyPi => &config.omp_display,
+        AgentKind::Hermes => &config.hermes_display,
+    }
+}
+
+fn save_config(config: &Config) -> io::Result<()> {
+    let user_home = home_dir()?;
+    let config_dir = user_home.join(".agent-presence");
+    fs::create_dir_all(&config_dir)?;
+    let config_path = config_dir.join("config.json");
+
+    let mut map = serde_json::Map::new();
+
+    // Client IDs
+    map.insert("client_id".into(), config.client_id.clone().into());
+    map.insert("opencode_client_id".into(), config.opencode_client_id.clone().into());
+    map.insert("pi_client_id".into(), config.pi_client_id.clone().into());
+    map.insert("claude_client_id".into(), config.claude_client_id.clone().into());
+    map.insert("omp_client_id".into(), config.omp_client_id.clone().into());
+
+    map.insert("hermes_client_id".into(), config.hermes_client_id.clone().into());
+    // Image/text
+    map.insert("large_image".into(), config.large_image.clone().into());
+    map.insert("large_text".into(), config.large_text.clone().into());
+    map.insert("claude_large_image".into(), config.claude_large_image.clone().into());
+    map.insert("claude_large_text".into(), config.claude_large_text.clone().into());
+    map.insert("opencode_large_image".into(), config.opencode_large_image.clone().into());
+    map.insert("opencode_large_text".into(), config.opencode_large_text.clone().into());
+    map.insert("pi_large_image".into(), config.pi_large_image.clone().into());
+    map.insert("pi_large_text".into(), config.pi_large_text.clone().into());
+    map.insert("omp_large_image".into(), config.omp_large_image.clone().into());
+    map.insert("omp_large_text".into(), config.omp_large_text.clone().into());
+
+    map.insert("hermes_large_image".into(), config.hermes_large_image.clone().into());
+    map.insert("hermes_large_text".into(), config.hermes_large_text.clone().into());
+    // General settings
+    map.insert("priority_presence".into(), config.priority_presence.into());
+    map.insert("detect_processes".into(), config.detect_processes.into());
+    map.insert("detect_codex".into(), config.detect_codex.into());
+    map.insert("detect_pi".into(), config.detect_pi.into());
+    map.insert("detect_opencode".into(), config.detect_opencode.into());
+    map.insert("detect_omp".into(), config.detect_omp.into());
+    map.insert("detect_claude".into(), config.detect_claude.into());
+    map.insert("detect_hermes".into(), config.detect_hermes.into());
+    map.insert("poll_seconds".into(), config.poll_seconds.into());
+    map.insert("stale_seconds".into(), config.stale_seconds.into());
+
+    // Paths
+    if let Some(p) = config.codex_home.to_str() { map.insert("codex_home".into(), p.into()); }
+    if let Some(p) = config.pi_home.to_str() { map.insert("pi_home".into(), p.into()); }
+    if let Some(p) = config.omp_home.to_str() { map.insert("omp_home".into(), p.into()); }
+    if let Some(p) = config.hermes_home.to_str() { map.insert("hermes_home".into(), p.into()); }
+
+    // Per-agent display settings
+    let save_ds = |prefix: &str, ds: &crate::DisplaySettings, map: &mut serde_json::Map<String, serde_json::Value>| {
+        map.insert(format!("{prefix}_show_project"), ds.show_project.into());
+        map.insert(format!("{prefix}_show_model"), ds.show_model.into());
+        map.insert(format!("{prefix}_show_branch"), ds.show_branch.into());
+        map.insert(format!("{prefix}_show_activity"), ds.show_activity.into());
+        map.insert(format!("{prefix}_show_surface"), ds.show_surface.into());
+        map.insert(format!("{prefix}_show_plan"), ds.show_plan.into());
+        map.insert(format!("{prefix}_show_tokens"), ds.show_tokens.into());
+        map.insert(format!("{prefix}_show_cost"), ds.show_cost.into());
+        map.insert(format!("{prefix}_show_context"), ds.show_context.into());
+        map.insert(format!("{prefix}_show_limits"), ds.show_limits.into());
+        map.insert(format!("{prefix}_flavor_text"), ds.flavor_text.into());
+    };
+
+    save_ds("codex", &config.codex_display, &mut map);
+    save_ds("claude", &config.claude_display, &mut map);
+    save_ds("opencode", &config.opencode_display, &mut map);
+    save_ds("pi", &config.pi_display, &mut map);
+    save_ds("omp", &config.omp_display, &mut map);
+    save_ds("hermes", &config.hermes_display, &mut map);
+
+    let value = serde_json::Value::Object(map);
+    let pretty = serde_json::to_string_pretty(&value)?;
+    fs::write(config_path, pretty)?;
+    Ok(())
 }
 
 fn print_status(config: &Config) -> io::Result<()> {
@@ -460,6 +641,7 @@ fn run_loop(config: &Config) -> io::Result<()> {
 
             discord = None;
             current_client_id.clear();
+            clear_first_seen_cache();
         }
 
         let poll_seconds = if config.priority_presence {
@@ -469,6 +651,130 @@ fn run_loop(config: &Config) -> io::Result<()> {
         };
         thread::sleep(Duration::from_secs(poll_seconds));
     }
+}
+
+fn run_tui_loop(config: Config) -> io::Result<()> {
+    let state = std::sync::Arc::new(parking_lot::Mutex::new(tui::AppState {
+        config: config.clone(),
+        current_session: None,
+        discord_connected: false,
+        running: true,
+    }));
+
+    let state_clone = state.clone();
+    let handle = thread::spawn(move || -> io::Result<()> {
+        let mut current_client_id = String::new();
+        let mut discord: Option<DiscordIpc> = None;
+
+        loop {
+            // Check if TUI quit
+            {
+                let guard = state_clone.lock();
+                if !guard.running {
+                    break;
+                }
+            }
+
+            // Read config from shared state (picks up toggle changes)
+            let session = {
+                let guard = state_clone.lock();
+                collect_session(&guard.config)?
+            };
+
+            if let Some(session) = session.as_ref().filter(|session| session.active) {
+                let client_id = {
+                    let guard = state_clone.lock();
+                    client_id_for_agent(&guard.config, session.agent).to_string()
+                };
+                validate_client_id(&client_id)?;
+
+                if current_client_id != client_id {
+                    if let Some(ref mut connection) = discord {
+                        let _ = connection.set_activity(None);
+                    }
+                    {
+                        let guard = state_clone.lock();
+                        let _ = clear_other_presences(&guard.config, &client_id);
+                    }
+                    let mut next = DiscordIpc::connect(&client_id)?;
+                    next.handshake(&client_id)?;
+                    discord = Some(next);
+                    current_client_id.clear();
+                    current_client_id.push_str(&client_id);
+                }
+
+                if let Some(ref mut connection) = discord {
+                    let guard = state_clone.lock();
+                    if let Err(error) =
+                        connection.set_activity(Some(activity_payload(&guard.config, Some(session))))
+                    {
+                        eprintln!("discord publish failed: {error}; reconnecting");
+                        let mut next = DiscordIpc::connect(&client_id)?;
+                        next.handshake(&client_id)?;
+                        *connection = next;
+                        current_client_id.clear();
+                        current_client_id.push_str(&client_id);
+                    }
+                }
+
+                // Update shared state with current session
+                {
+                    let mut guard = state_clone.lock();
+                    guard.current_session = Some(session.clone());
+                    guard.discord_connected = true;
+                }
+            } else {
+                if let Some(ref mut connection) = discord {
+                    if let Err(error) = connection.set_activity(None) {
+                        eprintln!("discord clear failed: {error}; clearing all presences");
+                        let guard = state_clone.lock();
+                        let _ = clear_all_presences(&guard.config);
+                    } else {
+                        let guard = state_clone.lock();
+                        let _ = clear_all_presences(&guard.config);
+                    }
+                } else {
+                    let guard = state_clone.lock();
+                    let _ = clear_all_presences(&guard.config);
+                }
+
+                discord = None;
+                current_client_id.clear();
+                clear_first_seen_cache();
+
+                // Update shared state
+                {
+                    let mut guard = state_clone.lock();
+                    guard.current_session = None;
+                    guard.discord_connected = false;
+                }
+            }
+
+            let poll_seconds = {
+                let guard = state_clone.lock();
+                if guard.config.priority_presence {
+                    guard.config.poll_seconds.min(PRIORITY_POLL_SECONDS).max(1)
+                } else {
+                    guard.config.poll_seconds.max(1)
+                }
+            };
+            thread::sleep(Duration::from_secs(poll_seconds));
+        }
+
+        Ok(())
+    });
+
+    // Run TUI on main thread
+    let result = tui::run_tui(config, state.clone());
+
+    // Signal presence loop to stop
+    {
+        let mut guard = state.lock();
+        guard.running = false;
+    }
+
+    let _ = handle.join();
+    result
 }
 
 fn validate_client_id(client_id: &str) -> io::Result<()> {
@@ -484,11 +790,15 @@ fn validate_client_id(client_id: &str) -> io::Result<()> {
 
 fn client_id_for_agent<'a>(config: &'a Config, agent: AgentKind) -> &'a str {
     match agent {
+        AgentKind::Claude => {
+            client_id_or_default(&config.claude_client_id, DEFAULT_CLAUDE_CLIENT_ID)
+        }
         AgentKind::OpenCode => {
             client_id_or_default(&config.opencode_client_id, DEFAULT_OPENCODE_CLIENT_ID)
         }
         AgentKind::Pi => client_id_or_default(&config.pi_client_id, DEFAULT_PI_CLIENT_ID),
         AgentKind::OhMyPi => client_id_or_default(&config.omp_client_id, DEFAULT_PI_CLIENT_ID),
+        AgentKind::Hermes => client_id_or_default(&config.hermes_client_id, &config.client_id),
         _ => &config.client_id,
     }
 }
@@ -574,6 +884,7 @@ enum AgentKind {
     OpenCode,
     Pi,
     OhMyPi,
+    Hermes,
 }
 
 impl AgentKind {
@@ -584,6 +895,7 @@ impl AgentKind {
             Self::OpenCode => "OpenCode",
             Self::Pi => "Pi",
             Self::OhMyPi => "Oh My Pi",
+            Self::Hermes => "Hermes",
         }
     }
 }
@@ -596,6 +908,11 @@ fn collect_session(config: &Config) -> io::Result<Option<AgentSession>> {
             sessions.push(session);
         }
     }
+    if config.detect_claude {
+        if let Some(session) = collect_claude_session()? {
+            sessions.push(session);
+        }
+    }
 
     if config.detect_pi {
         if let Some(session) = collect_pi_session(config)? {
@@ -604,6 +921,11 @@ fn collect_session(config: &Config) -> io::Result<Option<AgentSession>> {
     }
     if config.detect_omp {
         if let Some(session) = collect_omp_session(config)? {
+            sessions.push(session);
+        }
+    }
+    if config.detect_hermes {
+        if let Some(session) = collect_hermes_session(config)? {
             sessions.push(session);
         }
     }
@@ -827,6 +1149,80 @@ fn omp_activity_is_live(config: &Config) -> bool {
         .unwrap_or(false)
 }
 
+fn collect_hermes_session(config: &Config) -> io::Result<Option<AgentSession>> {
+    let sessions_path = config.hermes_home.join("sessions").join("sessions.json");
+    if !sessions_path.exists() {
+        return Ok(None);
+    }
+
+    let metadata = fs::metadata(&sessions_path)?;
+    let modified = metadata.modified().ok();
+    let age = modified
+        .and_then(|modified| modified.elapsed().ok())
+        .unwrap_or(Duration::MAX);
+
+    let sessions = read_json_object_file(&sessions_path)?;
+    let session = sessions.as_object().and_then(|object| {
+        object
+            .values()
+            .filter(|value| value.is_object())
+            .max_by(|left, right| {
+                hermes_session_updated_at(left).cmp(&hermes_session_updated_at(right))
+            })
+    });
+    let Some(session) = session else {
+        return Ok(None);
+    };
+
+    let model = session.get("model_override").and_then(|value| {
+        format_provider_model(
+            value.get("provider").and_then(Value::as_str),
+            value.get("model").and_then(Value::as_str),
+        )
+    });
+
+    let total_tokens = ["input_tokens", "output_tokens", "cache_read_tokens"]
+        .iter()
+        .filter_map(|key| session.get(*key).and_then(Value::as_u64))
+        .sum::<u64>();
+    let tokens = if total_tokens > 0 {
+        Some(format_tokens(total_tokens))
+    } else {
+        None
+    };
+
+    let cost = session
+        .get("estimated_cost_usd")
+        .and_then(Value::as_f64)
+        .filter(|cost| *cost > 0.0)
+        .map(format_cost);
+
+    Ok(Some(AgentSession {
+        agent: AgentKind::Hermes,
+        path: Some(sessions_path),
+        project: None,
+        branch: None,
+        model,
+        surface: Some("Hermes".to_string()),
+        activity: None,
+        plan: None,
+        tokens,
+        cost,
+        context: None,
+        limits: None,
+        active: age.as_secs() <= config.stale_seconds,
+        started_at: modified,
+    }))
+}
+
+fn hermes_session_updated_at(value: &Value) -> String {
+    value
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
 fn format_omp_model(provider: Option<&str>, model: Option<&str>) -> Option<String> {
     format_provider_model(provider, model)
 }
@@ -903,6 +1299,192 @@ fn opencode_activity_is_live() -> bool {
             contains_agent_process(&lower, &["opencode", "sst-dev.opencode"])
         })
         .unwrap_or(false)
+}
+/// Read ~/.claude/settings.json and extract the configured model display name.
+/// Claude Code stores shorthands like "opus[1m]" or "sonnet" — we map these
+/// to friendly names ("Opus 4.8", "Sonnet 4.8", etc.).
+fn claude_configured_model(claude_dir: &Path) -> Option<String> {
+    let settings_path = claude_dir.join("settings.json");
+    let raw = fs::read_to_string(&settings_path).ok()?;
+    let settings: Value = serde_json::from_str(&raw).ok()?;
+    let model_str = settings.get("model")?.as_str()?;
+
+    // Strip context-window suffix like "[1m]", "[200k]"
+    let base = model_str
+        .split('[')
+        .next()
+        .unwrap_or(model_str)
+        .trim()
+        .to_ascii_lowercase();
+
+    let display = match base.as_str() {
+        // Current Claude model shorthands
+        "opus" | "claude-opus-4-8" | "claude-opus-4-8-20250901" => "Opus 4.8",
+        "sonnet" | "claude-sonnet-4-8" | "claude-sonnet-4-8-20250901" => "Sonnet 4.8",
+        "haiku" | "claude-haiku-3-5" | "claude-haiku-3-5-20241022" => "Haiku 3.5",
+        // Legacy shorthands
+        "opus-3" | "claude-3-opus-20240229" => "Opus 3",
+        "sonnet-3" | "claude-3-sonnet-20240229" => "Sonnet 3",
+        "haiku-3" | "claude-3-haiku-20240307" => "Haiku 3",
+        // If it looks like a full API model name, reuse format_model_name
+        s if s.starts_with("claude-") => return Some(format_model_name(s)),
+        // Unknown shorthand — show it as-is but capitalized
+        other => {
+            let mut c = other.chars();
+            match c.next() {
+                None => return None,
+                Some(f) => {
+                    let capitalized: String = f.to_uppercase().collect::<String>() + c.as_str();
+                    return Some(capitalized);
+                }
+            }
+        }
+    };
+
+    Some(display.to_string())
+}
+
+fn collect_claude_session() -> io::Result<Option<AgentSession>> {
+    let user_home = home_dir()?;
+    let claude_dir = user_home.join(".claude");
+    let sessions_dir = claude_dir.join("sessions");
+
+    // Find the Claude Code PID from running processes
+    let processes = running_process_text()?;
+    let lower = processes.to_ascii_lowercase();
+    if !contains_agent_process(&lower, &["claude", "@anthropic-ai/claude-code"]) {
+        return Ok(None);
+    }
+
+    // Find the session file (PID.json)
+    let Some(session_entry) = newest_matching_file(&sessions_dir, "", ".json")? else {
+        return Ok(None);
+    };
+
+    let session_data: Value = read_json_object_file(&session_entry)?;
+    let session_id = session_data
+        .get("sessionId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let cwd = session_data
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(PathBuf::from);
+    let version = session_data
+        .get("version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let project = cwd
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .map(|name| name.to_string())
+        .filter(|name| !name.trim().is_empty());
+    let branch = cwd.as_deref().and_then(git_branch_for_path);
+
+    // Read the project session JSONL for usage data
+    let mut model: Option<String> = version;
+    let mut total_input_tokens: u64 = 0;
+    let mut total_output_tokens: u64 = 0;
+
+    if !session_id.is_empty() {
+        // Find the project directory from cwd
+        if let Some(cwd_path) = cwd.as_ref() {
+            let project_key = cwd_path
+                .to_str()
+                .map(|s| s.replace(':', "").replace('\\', "--").replace('/', "--"))
+                .unwrap_or_default();
+            let project_dir = claude_dir.join("projects").join(&project_key);
+            let session_jsonl = project_dir.join(format!("{session_id}.jsonl"));
+
+            if session_jsonl.exists() {
+                let raw = fs::read_to_string(&session_jsonl)?;
+                for line in raw.lines() {
+                    if let Ok(entry) = serde_json::from_str::<Value>(line) {
+                        if entry.get("type").and_then(|v| v.as_str()) == Some("assistant") {
+                            if let Some(msg) = entry.get("message") {
+                                // Get model from the last assistant message
+                                if let Some(m) = msg.get("model").and_then(|v| v.as_str()) {
+                                    model = Some(format_model_name(m));
+                                }
+                                // Accumulate usage
+                                if let Some(usage) = msg.get("usage") {
+                                    total_input_tokens += usage
+                                        .get("input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    total_input_tokens += usage
+                                        .get("cache_read_input_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                    total_output_tokens += usage
+                                        .get("output_tokens")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // Prefer the model from settings.json (what the user configured) over the
+    // JSONL model (which is the resolved/actual model from the API response).
+    // This matters when using a proxy that remaps models (e.g. Opus → mimo).
+    if let Some(configured) = claude_configured_model(&claude_dir) {
+        model = Some(configured);
+    }
+
+    let total_tokens = total_input_tokens + total_output_tokens;
+    let tokens = if total_tokens > 0 {
+        Some(format_tokens(total_tokens))
+    } else {
+        None
+    };
+
+    // Estimate cost: ~$3/M input, ~$15/M output for Claude
+    let cost = if total_input_tokens > 0 || total_output_tokens > 0 {
+        let input_cost = total_input_tokens as f64 * 3.0 / 1_000_000.0;
+        let output_cost = total_output_tokens as f64 * 15.0 / 1_000_000.0;
+        let total_cost = input_cost + output_cost;
+        Some(format!("${:.2}", total_cost))
+    } else {
+        None
+    };
+
+    let metadata = fs::metadata(&session_entry)?;
+    let modified = metadata.modified().ok();
+
+    // Active if the process is running (already checked at top of function)
+
+    Ok(Some(AgentSession {
+        agent: AgentKind::Claude,
+        path: Some(session_entry),
+        project,
+        branch,
+        model,
+        surface: Some("Claude Code".to_string()),
+        activity: None,
+        plan: None,
+        tokens,
+        cost,
+        context: None,
+        limits: None,
+        active: true,
+        started_at: modified,
+    }))
+}
+
+fn format_tokens(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}K tok", tokens as f64 / 1_000.0)
+    } else {
+        format!("{tokens} tok")
+    }
 }
 
 fn read_json_object_file(path: &Path) -> io::Result<Value> {
@@ -1172,7 +1754,7 @@ fn parse_session_text(raw: &str) -> ParsedSession {
                 .get("payload")
                 .and_then(|payload| payload.get("model"))
                 .and_then(Value::as_str)
-                .map(clean_model);
+                .map(format_model_name);
         }
 
         if parsed.surface.is_none()
@@ -1335,7 +1917,7 @@ fn parse_omp_session_text(raw: &str) -> ParsedPiSession {
         // OMP model_change: {"type":"model_change","model":"opencode-go/mimo-v2.5"}
         if value.get("type").and_then(Value::as_str) == Some("model_change") {
             if let Some(model) = value.get("model").and_then(Value::as_str) {
-                parsed.model = Some(clean_model(model));
+                parsed.model = Some(format_model_name(model));
             }
         }
 
@@ -1410,11 +1992,14 @@ fn pi_activity_from_message(message: &Value) -> Option<String> {
 
 fn activity_payload(config: &Config, session: Option<&AgentSession>) -> String {
     let active = session.map(|s| s.active).unwrap_or(false);
-    let details = if config.show_activity {
+    let agent = session.map(|s| s.agent).unwrap_or(AgentKind::Codex);
+    let ds = display_settings_for(config, agent);
+
+    let details = if ds.show_activity {
         session
             .and_then(|session| session.activity.as_deref())
             .unwrap_or_else(|| {
-                if config.flavor_text {
+                if ds.flavor_text {
                     rotating_detail(active)
                 } else if active {
                     active_agent_detail(session)
@@ -1422,7 +2007,7 @@ fn activity_payload(config: &Config, session: Option<&AgentSession>) -> String {
                     idle_agent_detail(session)
                 }
             })
-    } else if config.flavor_text {
+    } else if ds.flavor_text {
         rotating_detail(active)
     } else if active {
         active_agent_detail(session)
@@ -1432,55 +2017,55 @@ fn activity_payload(config: &Config, session: Option<&AgentSession>) -> String {
 
     let mut state_parts = Vec::new();
     if let Some(session) = session {
-        if !config.hide_project {
+        if ds.show_project {
             if let Some(project) = &session.project {
                 state_parts.push(project.clone());
             }
         }
 
-        if config.show_surface {
+        if ds.show_surface {
             if let Some(surface) = &session.surface {
                 state_parts.push(surface.clone());
             }
         }
 
-        if config.show_branch {
+        if ds.show_branch {
             if let Some(branch) = &session.branch {
                 state_parts.push(branch.clone());
             }
         }
 
-        if !config.hide_model {
+        if ds.show_model {
             if let Some(model) = &session.model {
                 state_parts.push(model.clone());
             }
         }
 
-        if config.show_plan {
+        if ds.show_plan {
             if let Some(plan) = &session.plan {
                 state_parts.push(plan.clone());
             }
         }
 
-        if config.show_tokens {
+        if ds.show_tokens {
             if let Some(tokens) = &session.tokens {
                 state_parts.push(tokens.clone());
             }
         }
 
-        if config.show_cost {
+        if ds.show_cost {
             if let Some(cost) = &session.cost {
                 state_parts.push(cost.clone());
             }
         }
 
-        if config.show_context {
+        if ds.show_context {
             if let Some(context) = &session.context {
                 state_parts.push(context.clone());
             }
         }
 
-        if config.show_limits {
+        if ds.show_limits {
             if let Some(limits) = &session.limits {
                 state_parts.push(limits.clone());
             }
@@ -1522,6 +2107,7 @@ fn active_agent_detail(session: Option<&AgentSession>) -> &'static str {
         Some(AgentKind::OpenCode) => "OpenCode",
         Some(AgentKind::Pi) => "Pi",
         Some(AgentKind::OhMyPi) => "Oh My Pi",
+        Some(AgentKind::Hermes) => "Using Hermes",
         _ => "Using Codex in terminal",
     }
 }
@@ -1532,6 +2118,7 @@ fn idle_agent_detail(session: Option<&AgentSession>) -> &'static str {
         Some(AgentKind::OpenCode) => "OpenCode",
         Some(AgentKind::Pi) => "Pi idle",
         Some(AgentKind::OhMyPi) => "Oh My Pi idle",
+        Some(AgentKind::Hermes) => "Hermes idle",
         _ => "Codex idle",
     }
 }
@@ -1542,9 +2129,24 @@ fn asset_profile(config: &Config, agent: Option<AgentKind>) -> (&str, &str) {
         Some(AgentKind::OpenCode) => (&config.opencode_large_image, &config.opencode_large_text),
         Some(AgentKind::Pi) => (&config.pi_large_image, &config.pi_large_text),
         Some(AgentKind::OhMyPi) => (&config.omp_large_image, &config.omp_large_text),
+        Some(AgentKind::Hermes) => (&config.hermes_large_image, &config.hermes_large_text),
         _ => (&config.large_image, &config.large_text),
     }
 }
+/// Get or initialize the first-seen time for an agent kind.
+/// Returns the cached time if already seen, or records and returns the current time.
+fn get_or_init_first_seen(agent: AgentKind) -> SystemTime {
+    let idx = agent as usize;
+    let mut cache = FIRST_SEEN.lock();
+    let slots = cache.get_or_insert_with(|| [None; 6]);
+    *slots[idx].get_or_insert(SystemTime::now())
+}
+/// Clear all cached first-seen times (call when no process is detected).
+fn clear_first_seen_cache() {
+    let mut cache = FIRST_SEEN.lock();
+    *cache = None;
+}
+
 fn detect_process_session(config: &Config) -> Option<AgentSession> {
     let processes = running_process_text().ok()?;
 
@@ -1564,7 +2166,7 @@ fn detect_process_session(config: &Config) -> Option<AgentSession> {
         context: None,
         limits: None,
         active: true,
-        started_at: Some(SystemTime::now()),
+        started_at: Some(get_or_init_first_seen(agent)),
     })
 }
 
@@ -1577,7 +2179,9 @@ fn detect_agent_from_process_text(processes: &str, config: &Config) -> Option<Ag
         return Some(AgentKind::OpenCode);
     }
 
-    if contains_agent_process(&lower, &["claude", "@anthropic-ai/claude-code"]) {
+    if config.detect_claude
+        && contains_agent_process(&lower, &["claude", "@anthropic-ai/claude-code"])
+    {
         return Some(AgentKind::Claude);
     }
 
@@ -1780,27 +2384,70 @@ fn read_head(path: &Path, max_bytes: u64) -> io::Result<String> {
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-fn clean_model(model: &str) -> String {
+
+fn format_model_name(model: &str) -> String {
     let trimmed = model.trim();
     let fast = trimmed.ends_with("-fast");
     let base = trimmed.strip_suffix("-fast").unwrap_or(trimmed);
-    let mut display = base
-        .split('-')
-        .map(|part| {
-            if part.chars().all(|ch| ch.is_ascii_digit() || ch == '.') {
-                part.to_string()
-            } else {
-                part.to_ascii_uppercase()
+
+    // Known model name mappings
+    let display = match base {
+        // Claude models
+        "claude-opus-4-8" | "claude-opus-4-8-20250901" => "Opus 4.8",
+        "claude-sonnet-4-8" | "claude-sonnet-4-8-20250901" => "Sonnet 4.8",
+        "claude-haiku-3-5" | "claude-haiku-3-5-20241022" => "Haiku 3.5",
+        "claude-3-5-sonnet-20241022" => "Sonnet 3.5",
+        "claude-3-5-haiku-20241022" => "Haiku 3.5",
+        "claude-3-opus-20240229" => "Opus 3",
+        "claude-3-sonnet-20240229" => "Sonnet 3",
+        "claude-3-haiku-20240307" => "Haiku 3",
+        // OpenAI models
+        s if s.starts_with("gpt-4o") => "GPT-4o",
+        s if s.starts_with("gpt-4-turbo") => "GPT-4 Turbo",
+        s if s.starts_with("gpt-4") => "GPT-4",
+        s if s.starts_with("gpt-3.5") => "GPT-3.5",
+        s if s.starts_with("o1") => "o1",
+        s if s.starts_with("o3") => "o3",
+        s if s.starts_with("codex") && s.contains("mini") => "Codex Mini",
+        s if s.starts_with("codex") => "Codex",
+        // Google models
+        s if s.starts_with("gemini-2") => "Gemini 2",
+        s if s.starts_with("gemini-1") => "Gemini 1",
+        // Anthropic other
+        s if s.starts_with("claude-") => {
+            // Generic fallback: strip prefix and format
+            let rest = s.strip_prefix("claude-").unwrap_or(s);
+            let parts: Vec<&str> = rest.split('-').collect();
+            let name = parts.first().map(|s| {
+                let mut c = s.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            }).unwrap_or_default();
+            let version: String = parts[1..].join(".");
+            if version.is_empty() {
+                return if fast { format!("Fast {name}") } else { name };
             }
-        })
-        .collect::<Vec<_>>()
-        .join("-");
+            return if fast { format!("Fast {name} {version}") } else { format!("{name} {version}") };
+        }
+        // OpenCode/other Go models - strip provider prefix
+        s if s.contains('/') => {
+            let parts: Vec<&str> = s.split('/').collect();
+            if let Some(model_part) = parts.last() {
+                model_part
+            } else {
+                s
+            }
+        }
+        other => other,
+    };
 
     if fast {
-        display = format!("Fast {}", display);
+        format!("Fast {display}")
+    } else {
+        display.to_string()
     }
-
-    display
 }
 
 #[derive(Clone, Copy)]
@@ -1914,22 +2561,9 @@ fn format_limits(rate_limits: Option<&Value>) -> Option<String> {
     Some(format!("5h {:.0}% | 7d {:.0}%", primary, secondary))
 }
 
-fn format_tokens(tokens: u64) -> String {
-    if tokens >= 1_000_000 {
-        format!("{:.1}M tok", tokens as f64 / 1_000_000.0)
-    } else if tokens >= 1_000 {
-        format!("{:.1}K tok", tokens as f64 / 1_000.0)
-    } else {
-        format!("{tokens} tok")
-    }
-}
 
 fn format_cost(cost: f64) -> String {
-    if cost >= 1.0 {
-        format!("${cost:.2}")
-    } else {
-        format!("${cost:.4}")
-    }
+    format!("${cost:.2}")
 }
 
 fn estimate_cost(_model: &str, _usage: TokenUsage) -> Option<String> {
