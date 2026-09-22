@@ -1,3 +1,4 @@
+// Refactored but never tested, but should work.
 mod commands;
 mod config;
 mod detect;
